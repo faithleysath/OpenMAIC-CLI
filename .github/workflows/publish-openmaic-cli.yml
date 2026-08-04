@@ -1,0 +1,98 @@
+name: Publish OpenMAIC local CLI
+
+on:
+  push:
+    tags:
+      - "@faithleysath/openmaic-generator@*"
+      - "@faithleysath/openmaic-cli@*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build, test, and pack without publishing"
+        type: boolean
+        default: true
+
+concurrency:
+  group: publish-openmaic-cli-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Verify upstream release baseline
+        shell: bash
+        run: |
+          nearest_tag="$(git describe --tags --match 'v[0-9]*' --abbrev=0 HEAD)"
+          baseline="$(node -p 'require("./packages/openmaic-generator/package.json").openmaicUpstreamBaseline')"
+          test "$nearest_tag" = "$baseline" || {
+            echo "Generator baseline $baseline does not match nearest release tag $nearest_tag" >&2
+            exit 1
+          }
+
+      - name: Build packages in dependency order
+        run: |
+          pnpm --filter @openmaic/dsl build
+          pnpm --filter @faithleysath/openmaic-generator build
+          pnpm --filter @faithleysath/openmaic-cli build
+
+      - name: Typecheck and test
+        run: |
+          pnpm --filter @faithleysath/openmaic-generator typecheck
+          pnpm --filter @faithleysath/openmaic-cli typecheck
+          pnpm --filter @faithleysath/openmaic-generator test
+          pnpm --filter @faithleysath/openmaic-cli test
+
+      - name: Inspect tarballs
+        run: |
+          pnpm --dir packages/openmaic-generator pack --dry-run
+          pnpm --dir packages/openmaic-cli pack --dry-run
+
+      - name: Publish generator if absent
+        if: github.event_name == 'push' || inputs.dry_run == false
+        shell: bash
+        run: |
+          name="$(node -p 'require("./packages/openmaic-generator/package.json").name')"
+          version="$(node -p 'require("./packages/openmaic-generator/package.json").version')"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version already exists; skipping"
+          else
+            pnpm --dir packages/openmaic-generator publish --access public --provenance --no-git-checks
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+
+      - name: Publish CLI if absent
+        if: github.event_name == 'push' || inputs.dry_run == false
+        shell: bash
+        run: |
+          name="$(node -p 'require("./packages/openmaic-cli/package.json").name')"
+          version="$(node -p 'require("./packages/openmaic-cli/package.json").version')"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version already exists; skipping"
+          else
+            generator_version="$(node -p 'require("./packages/openmaic-generator/package.json").version')"
+            npm view "@faithleysath/openmaic-generator@$generator_version" version >/dev/null
+            pnpm --dir packages/openmaic-cli publish --access public --provenance --no-git-checks
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"

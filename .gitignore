@@ -32,6 +32,12 @@ CLAUDE.local.md
 # production
 /build
 /dist
+/packages/**/dist/
+
+# workspace package install/build artifacts
+/packages/**/node_modules/
+/packages/**/coverage/
+*.tgz
 
 # generated: synced from packages/@openmaic/importer/dist for runtime URL import
 /public/vendor/maic-importer
@@ -67,6 +73,9 @@ next-env.d.ts
 
 # worktrees
 .worktrees
+
+# local Kilo implementation plans
+/.kilo/plans/
 
 # generated data
 /data
