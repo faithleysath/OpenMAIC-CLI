@@ -52,6 +52,8 @@ jobs:
       - name: Verify upstream release baseline
         shell: bash
         run: |
+          git fetch --force --tags https://github.com/THU-MAIC/OpenMAIC.git \
+            '+refs/tags/v*:refs/tags/v*'
           nearest_tag="$(git describe --tags --match 'v[0-9]*' --abbrev=0 HEAD)"
           baseline="$(node -p 'require("./packages/openmaic-generator/package.json").openmaicUpstreamBaseline')"
           test "$nearest_tag" = "$baseline" || {
@@ -133,10 +135,13 @@ jobs:
         if: github.event_name == 'push' || inputs.dry_run == false
         shell: bash
         run: |
-          test -z "${NODE_AUTH_TOKEN:-}" || {
-            echo "NODE_AUTH_TOKEN must not be set for OIDC publishing" >&2
-            exit 1
-          }
+          case "${NODE_AUTH_TOKEN:-}" in
+            ""|"XXXXX-XXXXX-XXXXX-XXXXX") ;;
+            *)
+              echo "A real NODE_AUTH_TOKEN must not be set for OIDC publishing" >&2
+              exit 1
+              ;;
+          esac
           test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || {
             echo "GitHub OIDC request URL is unavailable; check id-token: write" >&2
             exit 1
