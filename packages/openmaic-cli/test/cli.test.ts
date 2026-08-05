@@ -1,8 +1,14 @@
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const cli = resolve('dist/cli.js');
+const packageVersion = (
+  JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+    version: string;
+  }
+).version;
 
 function run(
   args: string[],
@@ -24,7 +30,11 @@ function run(
 
 describe('compiled CLI', () => {
   it('prints the package version', async () => {
-    expect(await run(['--version'])).toMatchObject({ code: 0, stdout: '0.1.0\n', stderr: '' });
+    expect(await run(['--version'])).toMatchObject({
+      code: 0,
+      stdout: `${packageVersion}\n`,
+      stderr: '',
+    });
   });
 
   it('runs doctor without a paid probe', async () => {

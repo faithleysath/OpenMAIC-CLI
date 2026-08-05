@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { resolve } from 'node:path';
+import { createRequire } from 'node:module';
 import {
   CLASSROOM_EXTENSION,
   OUTLINE_EXTENSION,
@@ -16,7 +17,7 @@ import {
 } from '@faithleysath/openmaic-generator';
 import { loadConfig, loadLocalEnvironment, parseThinking, resolveCliModel } from './config.js';
 
-const VERSION = '0.1.0';
+const VERSION = (createRequire(import.meta.url)('../package.json') as { version: string }).version;
 
 const HELP = `OpenMAIC local BYOK generator
 
