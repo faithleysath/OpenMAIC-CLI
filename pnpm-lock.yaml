@@ -673,7 +673,7 @@ importers:
   packages/openmaic-cli:
     dependencies:
       '@faithleysath/openmaic-generator':
-        specifier: workspace:^0.1.0
+        specifier: workspace:^0.1.1
         version: link:../openmaic-generator
     devDependencies:
       '@types/node':
