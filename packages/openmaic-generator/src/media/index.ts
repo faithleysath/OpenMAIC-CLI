@@ -27,8 +27,8 @@ export const IMAGE_PROVIDERS: readonly ProviderDefinition[] = [
   {
     id: 'seedream',
     envPrefix: 'IMAGE_SEEDREAM',
-    defaultBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
-    defaultModel: 'doubao-seedream-4-5-251128',
+    defaultBaseUrl: 'https://ark.cn-beijing.volces.com',
+    defaultModel: 'doubao-seedream-5-0-260128',
     requiresApiKey: true,
   },
   {
@@ -150,7 +150,12 @@ export const TTS_PROVIDERS: readonly ProviderDefinition[] = [
     requiresApiKey: true,
   },
   { id: 'voxcpm-tts', envPrefix: 'TTS_VOXCPM', requiresApiKey: false },
-  { id: 'doubao-tts', envPrefix: 'TTS_DOUBAO', requiresApiKey: true },
+  {
+    id: 'doubao-tts',
+    envPrefix: 'TTS_DOUBAO',
+    defaultBaseUrl: 'https://openspeech.bytedance.com/api/v3/tts',
+    requiresApiKey: true,
+  },
   {
     id: 'elevenlabs-tts',
     envPrefix: 'TTS_ELEVENLABS',
@@ -236,7 +241,7 @@ async function download(
 ): Promise<{ data: Buffer; mimeType: string }> {
   const response = await createNetworkAdapter({ timeoutMs: 180_000, maxResponseBytes: maxBytes })(
     url,
-    { signal, redirect: 'manual' },
+    { signal },
   );
   if (!response.ok)
     throw new OpenMaicError('PROVIDER_ERROR', `Asset download failed (${response.status}).`);
@@ -259,19 +264,32 @@ async function generateImage(
   }
   const size = dimensions(request.aspectRatio);
   const root = provider.baseUrl.replace(/\/+$/, '');
-  const url = root.endsWith('/images/generations') ? root : `${root}/images/generations`;
+  const providerRoot =
+    provider.id === 'seedream' && !/\/api\//.test(root) ? `${root}/api/v3` : root;
+  const url = providerRoot.endsWith('/images/generations')
+    ? providerRoot
+    : `${providerRoot}/images/generations`;
+  const body =
+    provider.id === 'seedream'
+      ? {
+          model: provider.model,
+          prompt: request.prompt,
+          size: '2K',
+          watermark: false,
+        }
+      : {
+          model: provider.model,
+          prompt: request.prompt,
+          size: `${size.width}x${size.height}`,
+          response_format: 'b64_json',
+        };
   const response = await createNetworkAdapter({ timeoutMs: 180_000 })(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...(provider.apiKey ? { Authorization: `Bearer ${provider.apiKey}` } : {}),
     },
-    body: JSON.stringify({
-      model: provider.model,
-      prompt: request.prompt,
-      size: `${size.width}x${size.height}`,
-      response_format: 'b64_json',
-    }),
+    body: JSON.stringify(body),
     signal,
     credentialBearing: Boolean(provider.apiKey),
   });
@@ -382,12 +400,108 @@ async function generateVideo(
   };
 }
 
+function splitConcatenatedJsonObjects(text: string): string[] {
+  const objects: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === '{') {
+      if (depth === 0) start = index;
+      depth += 1;
+    } else if (character === '}' && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        objects.push(text.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+  return objects;
+}
+
+async function generateDoubaoTts(
+  provider: ResolvedMediaProvider,
+  text: string,
+  ref: string,
+  signal?: AbortSignal,
+): Promise<GeneratedAssetBlob> {
+  const rawKey = provider.apiKey ?? '';
+  const colonIndex = rawKey.indexOf(':');
+  const isPlanKey = colonIndex < 0;
+  const appId = isPlanKey ? '' : rawKey.slice(0, colonIndex);
+  const accessKey = isPlanKey ? '' : rawKey.slice(colonIndex + 1);
+  if (!rawKey || (!isPlanKey && (!appId || !accessKey))) {
+    throw new OpenMaicError('PROVIDER_ERROR', 'Doubao TTS API key is malformed.');
+  }
+  const authHeaders: Record<string, string> = isPlanKey
+    ? { 'X-Api-Key': rawKey }
+    : { 'X-Api-App-Id': appId, 'X-Api-Access-Key': accessKey };
+  const response = await createNetworkAdapter({
+    timeoutMs: 180_000,
+    maxResponseBytes: 25 * 1024 * 1024,
+  })(`${provider.baseUrl.replace(/\/+$/, '')}/unidirectional`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders,
+      'X-Api-Resource-Id': 'seed-tts-2.0',
+    },
+    body: JSON.stringify({
+      user: { uid: 'openmaic' },
+      req_params: {
+        text,
+        speaker: provider.voice ?? 'zh_female_vv_uranus_bigtts',
+        audio_params: { format: 'mp3', sample_rate: 24_000, speech_rate: 0 },
+      },
+    }),
+    signal,
+    credentialBearing: true,
+  });
+  if (!response.ok) {
+    throw new OpenMaicError(
+      'PROVIDER_ERROR',
+      `doubao-tts error (${response.status}): ${(await readResponseText(response)).slice(0, 500)}`,
+    );
+  }
+  const chunks: Buffer[] = [];
+  const responseText = await readResponseText(response, 25 * 1024 * 1024);
+  for (const objectText of splitConcatenatedJsonObjects(responseText)) {
+    const chunk = JSON.parse(objectText) as { code: number; message?: string; data?: string };
+    if (chunk.code === 0 && chunk.data) chunks.push(Buffer.from(chunk.data, 'base64'));
+    else if (chunk.code === 20_000_000) break;
+    else if (chunk.code) {
+      throw new OpenMaicError(
+        'PROVIDER_ERROR',
+        `doubao-tts error (${chunk.code}): ${chunk.message ?? 'unknown error'}`,
+      );
+    }
+  }
+  if (!chunks.length) {
+    throw new OpenMaicError('PROVIDER_ERROR', 'Doubao TTS returned no audio data.');
+  }
+  const data = Buffer.concat(chunks);
+  return { ref, type: 'audio', mimeType: 'audio/mpeg', size: data.byteLength, data };
+}
+
 async function generateTts(
   provider: ResolvedMediaProvider,
   text: string,
   ref: string,
   signal?: AbortSignal,
 ): Promise<GeneratedAssetBlob> {
+  if (provider.id === 'doubao-tts') {
+    return generateDoubaoTts(provider, text, ref, signal);
+  }
   const root = provider.baseUrl.replace(/\/+$/, '');
   let url = `${root}/audio/speech`;
   let headers: Record<string, string> = { 'Content-Type': 'application/json; charset=utf-8' };

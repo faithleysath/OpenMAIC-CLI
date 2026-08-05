@@ -146,7 +146,7 @@ export async function generateOutline(
       height: image.height,
     })),
     signal: input.signal,
-    maxOutputTokens: 16_384,
+    maxOutputTokens: llm.outputWindow,
   });
   throwIfAborted(input.signal);
   const parsed = parseJsonResponse<RawOutlineResponse | SceneOutline[]>(response);

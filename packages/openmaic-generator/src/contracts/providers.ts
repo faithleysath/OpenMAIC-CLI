@@ -9,6 +9,13 @@ export interface ProviderCatalogEntry {
   envPrefix: string;
   defaultBaseUrl?: string;
   requiresApiKey: boolean;
+  models?: readonly ProviderCatalogModel[];
+}
+
+export interface ProviderCatalogModel {
+  id: string;
+  contextWindow?: number;
+  outputWindow?: number;
 }
 
 export const PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = [
@@ -48,8 +55,12 @@ export const PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = [
     name: 'DeepSeek',
     type: 'openai',
     envPrefix: 'DEEPSEEK',
-    defaultBaseUrl: 'https://api.deepseek.com',
+    defaultBaseUrl: 'https://api.deepseek.com/v1',
     requiresApiKey: true,
+    models: [
+      { id: 'deepseek-v4-pro', contextWindow: 1_048_576, outputWindow: 393_216 },
+      { id: 'deepseek-v4-flash', contextWindow: 1_048_576, outputWindow: 393_216 },
+    ],
   },
   {
     id: 'qwen',
@@ -172,6 +183,11 @@ export const DEFAULT_AGENTS: readonly CliAgent[] = [
 
 export function getProviderCatalogEntry(id: string): ProviderCatalogEntry | undefined {
   return PROVIDER_CATALOG.find((provider) => provider.id === id);
+}
+
+export function getModelOutputWindow(providerId: string, modelId: string): number | undefined {
+  return getProviderCatalogEntry(providerId)?.models?.find((model) => model.id === modelId)
+    ?.outputWindow;
 }
 
 const MODEL_ID_ALIASES: ReadonlyMap<string, string> = new Map([['openai:gpt-5.6-sol', 'gpt-5.6']]);

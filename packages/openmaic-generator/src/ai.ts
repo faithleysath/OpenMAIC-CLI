@@ -5,6 +5,7 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { generateText, type JSONValue, type LanguageModel } from 'ai';
 import {
   getProviderCatalogEntry,
+  getModelOutputWindow,
   modelSupportsVision,
   type ProviderType,
 } from './contracts/providers.js';
@@ -37,6 +38,7 @@ export interface LLMUsage {
 
 export interface LLMCaller {
   readonly supportsVision?: boolean;
+  readonly outputWindow?: number;
   generate(input: LLMGenerateInput): Promise<string>;
 }
 
@@ -55,6 +57,7 @@ export interface ModelSelection {
   baseUrl?: string;
   providerType?: ProviderType;
   vision?: boolean;
+  outputWindow?: number;
   thinking?: ThinkingConfig;
 }
 
@@ -123,6 +126,7 @@ export function resolveModelSelection(
     providerType,
     thinking: overrides.thinking,
     vision: overrides.vision ?? modelSupportsVision(providerId, modelId),
+    outputWindow: overrides.outputWindow ?? getModelOutputWindow(providerId, modelId),
   };
 }
 
@@ -221,6 +225,7 @@ export function createLLMCaller(options: CreateLLMCallerOptions): LLMCaller {
   return {
     supportsVision:
       options.model.vision ?? modelSupportsVision(options.model.providerId, options.model.modelId),
+    outputWindow: options.model.outputWindow,
     async generate(input) {
       throwIfAborted(input.signal);
       const userContent = input.images?.length

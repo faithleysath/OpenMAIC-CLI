@@ -383,6 +383,7 @@ export async function diagnoseConfiguration(
     modelString?: string;
     model?: ModelSelection;
     probe?: boolean;
+    llm?: LLMCaller;
     onUsage?: CreateLLMCallerOptions['onUsage'];
   } = {},
 ): Promise<DoctorCheck[]> {
@@ -395,11 +396,11 @@ export async function diagnoseConfiguration(
       message: `${model.providerId}:${model.modelId} is configured`,
     });
     if (options.probe) {
-      const caller = createLLMCaller({ model, onUsage: options.onUsage });
+      const caller = options.llm ?? createLLMCaller({ model, onUsage: options.onUsage });
       const result = await caller.generate({
         system: 'Reply with exactly OK.',
         user: 'Health check.',
-        maxOutputTokens: 8,
+        maxOutputTokens: 64,
       });
       checks.push({
         id: 'probe',

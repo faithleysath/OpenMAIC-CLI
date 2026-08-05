@@ -428,7 +428,7 @@ export async function performWebSearch(input: {
     system: rewritePrompt.system,
     user: rewritePrompt.user,
     signal: input.signal,
-    maxOutputTokens: 512,
+    maxOutputTokens: 256,
   });
   const parsed = parseJsonResponse<{ query?: string } | string>(rewritten);
   const query = normalizeQuery(

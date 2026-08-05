@@ -278,7 +278,7 @@ export async function generateSceneContent(
         mimeType: image.mimeType,
       })),
       signal,
-      maxOutputTokens: 24_000,
+      maxOutputTokens: llm.outputWindow,
     });
     const parsed = parseJsonResponse<{
       elements?: unknown[];
@@ -311,7 +311,7 @@ export async function generateSceneContent(
       system: prompt.system,
       user: prompt.user,
       signal,
-      maxOutputTokens: 12_000,
+      maxOutputTokens: llm.outputWindow,
     });
     const parsed = parseJsonResponse<unknown[]>(response);
     return Array.isArray(parsed) ? { questions: normalizeQuizQuestions(parsed) } : null;
@@ -323,7 +323,7 @@ export async function generateSceneContent(
       system: prompt.system,
       user: prompt.user,
       signal,
-      maxOutputTokens: 32_000,
+      maxOutputTokens: llm.outputWindow,
     });
     const html = extractHtml(response);
     if (!html) return null;
@@ -446,7 +446,7 @@ export async function generateSceneActions(
     system: prompt.system,
     user: prompt.user,
     signal,
-    maxOutputTokens: 12_000,
+    maxOutputTokens: llm.outputWindow,
   });
   const actions = parseActions(response, outline.type, allowed);
   if (actions.length) return processActions(actions, content, agents);
