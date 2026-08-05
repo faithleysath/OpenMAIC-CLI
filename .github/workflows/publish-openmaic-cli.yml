@@ -13,7 +13,7 @@ on:
         default: true
 
 concurrency:
-  group: publish-openmaic-cli-${{ github.ref }}
+  group: publish-openmaic-cli
   cancel-in-progress: false
 
 jobs:
@@ -23,17 +23,29 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
-          cache: pnpm
+          node-version: 24
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Install OIDC-capable npm CLI
+        run: |
+          npm install --global npm@12
+          npm_version="$(npm --version)"
+          NPM_VERSION="$npm_version" node -e '
+            const [major, minor, patch] = process.env.NPM_VERSION.split(".").map(Number);
+            if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) {
+              throw new Error(`npm ${process.env.NPM_VERSION} does not support trusted publishing`);
+            }
+          '
+          echo "npm $npm_version"
 
       - run: pnpm install --frozen-lockfile
 
@@ -46,6 +58,20 @@ jobs:
             echo "Generator baseline $baseline does not match nearest release tag $nearest_tag" >&2
             exit 1
           }
+
+      - name: Verify release tag matches package version
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          generator_version="$(node -p 'require("./packages/openmaic-generator/package.json").version')"
+          cli_version="$(node -p 'require("./packages/openmaic-cli/package.json").version')"
+          case "$GITHUB_REF_NAME" in
+            "@faithleysath/openmaic-generator@$generator_version"|"@faithleysath/openmaic-cli@$cli_version") ;;
+            *)
+              echo "Release tag $GITHUB_REF_NAME does not match either package version" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Build packages in dependency order
         run: |
@@ -60,10 +86,77 @@ jobs:
           pnpm --filter @faithleysath/openmaic-generator test
           pnpm --filter @faithleysath/openmaic-cli test
 
-      - name: Inspect tarballs
+      - name: Pack and inspect release tarballs
+        id: tarballs
+        shell: bash
         run: |
-          pnpm --dir packages/openmaic-generator pack --dry-run
-          pnpm --dir packages/openmaic-cli pack --dry-run
+          pack_dir="$RUNNER_TEMP/openmaic-npm-packages"
+          rm -rf "$pack_dir"
+          mkdir -p "$pack_dir"
+          pnpm --dir packages/openmaic-generator pack --pack-destination "$pack_dir"
+          pnpm --dir packages/openmaic-cli pack --pack-destination "$pack_dir"
+
+          shopt -s nullglob
+          generator_files=("$pack_dir"/faithleysath-openmaic-generator-*.tgz)
+          cli_files=("$pack_dir"/faithleysath-openmaic-cli-*.tgz)
+          test "${#generator_files[@]}" -eq 1
+          test "${#cli_files[@]}" -eq 1
+
+          generator_manifest="$(tar -xOf "${generator_files[0]}" package/package.json)"
+          cli_manifest="$(tar -xOf "${cli_files[0]}" package/package.json)"
+          GENERATOR_MANIFEST="$generator_manifest" CLI_MANIFEST="$cli_manifest" node -e '
+            const generator = JSON.parse(process.env.GENERATOR_MANIFEST);
+            const cli = JSON.parse(process.env.CLI_MANIFEST);
+            const generatorSource = require("./packages/openmaic-generator/package.json");
+            const cliSource = require("./packages/openmaic-cli/package.json");
+            const expectedDsl = generatorSource.dependencies["@openmaic/dsl"].replace(/^workspace:/, "");
+            const expectedGenerator = cliSource.dependencies["@faithleysath/openmaic-generator"].replace(/^workspace:/, "");
+            if (generator.dependencies["@openmaic/dsl"] !== expectedDsl) {
+              throw new Error("Generator tarball has an unresolved or unexpected DSL dependency");
+            }
+            if (cli.dependencies["@faithleysath/openmaic-generator"] !== expectedGenerator) {
+              throw new Error("CLI tarball has an unresolved or unexpected generator dependency");
+            }
+            for (const manifest of [generator, cli]) {
+              for (const dependency of Object.values(manifest.dependencies ?? {})) {
+                if (dependency.startsWith("workspace:")) {
+                  throw new Error(`${manifest.name} tarball contains an unresolved workspace dependency`);
+                }
+              }
+            }
+          '
+
+          echo "generator=${generator_files[0]}" >> "$GITHUB_OUTPUT"
+          echo "cli=${cli_files[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify npm trusted-publishing environment
+        if: github.event_name == 'push' || inputs.dry_run == false
+        shell: bash
+        run: |
+          test -z "${NODE_AUTH_TOKEN:-}" || {
+            echo "NODE_AUTH_TOKEN must not be set for OIDC publishing" >&2
+            exit 1
+          }
+          test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || {
+            echo "GitHub OIDC request URL is unavailable; check id-token: write" >&2
+            exit 1
+          }
+          test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" || {
+            echo "GitHub OIDC request token is unavailable; check id-token: write" >&2
+            exit 1
+          }
+          node -e '
+            const expected = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}`;
+            for (const path of [
+              "./packages/openmaic-generator/package.json",
+              "./packages/openmaic-cli/package.json",
+            ]) {
+              const repository = require(path).repository.url.replace(/\.git$/, "");
+              if (repository !== expected) {
+                throw new Error(`${path} repository ${repository} does not match ${expected}`);
+              }
+            }
+          '
 
       - name: Publish generator if absent
         if: github.event_name == 'push' || inputs.dry_run == false
@@ -74,11 +167,8 @@ jobs:
           if npm view "$name@$version" version >/dev/null 2>&1; then
             echo "$name@$version already exists; skipping"
           else
-            pnpm --dir packages/openmaic-generator publish --access public --provenance --no-git-checks
+            npm publish "${{ steps.tarballs.outputs.generator }}" --access public
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
 
       - name: Publish CLI if absent
         if: github.event_name == 'push' || inputs.dry_run == false
@@ -90,9 +180,15 @@ jobs:
             echo "$name@$version already exists; skipping"
           else
             generator_version="$(node -p 'require("./packages/openmaic-generator/package.json").version')"
-            npm view "@faithleysath/openmaic-generator@$generator_version" version >/dev/null
-            pnpm --dir packages/openmaic-cli publish --access public --provenance --no-git-checks
+            for attempt in {1..12}; do
+              if npm view "@faithleysath/openmaic-generator@$generator_version" version >/dev/null 2>&1; then
+                break
+              fi
+              if [ "$attempt" -eq 12 ]; then
+                echo "Generator $generator_version is not visible in the registry" >&2
+                exit 1
+              fi
+              sleep 5
+            done
+            npm publish "${{ steps.tarballs.outputs.cli }}" --access public
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
