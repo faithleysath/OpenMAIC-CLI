@@ -48,6 +48,12 @@ export interface OpenMaicGeneratorConfig {
   llm?: LLMCaller;
   model?: ModelSelection;
   modelString?: string;
+  /**
+   * Host-injected provider ports (HXR AI Gateway). When set, operation-keyed
+   * ports take precedence over the single `llm` / env-based media providers.
+   */
+  providers?: import('./contracts/ports.js').OpenMaicProviderPorts;
+  observer?: import('./contracts/ports.js').OpenMaicCallObserver;
   prompts?: PromptRepository;
   agents?: CliAgent[];
   documentProviderId?: string;
@@ -114,12 +120,26 @@ export function createOpenMaicGenerator(config: OpenMaicGeneratorConfig = {}): O
   const prompts = config.prompts ?? new FilePromptRepository();
   const agents = (config.agents ?? DEFAULT_AGENTS).map((agent) => ({ ...agent }));
   let llm = config.llm;
-  const getLLM = (): LLMCaller => {
+  const getLLM = (
+    operationKey:
+      | import('./contracts/ports.js').OpenMaicOperationKey
+      | undefined = 'openmaic.outline.generate',
+  ): LLMCaller => {
+    if (config.providers) {
+      return config.providers.llm(operationKey ?? 'openmaic.outline.generate');
+    }
     if (!llm) {
       const selection = config.model ?? resolveModelSelection(config.modelString);
       llm = createLLMCaller({ model: selection, onUsage: config.onUsage, onDebug: config.onDebug });
     }
     return llm;
+  };
+  const getSceneContentOperation = (
+    type: string,
+  ): import('./contracts/ports.js').OpenMaicOperationKey => {
+    if (type === 'quiz') return 'openmaic.scene.quiz.content';
+    if (type === 'interactive') return 'openmaic.scene.interactive.content';
+    return 'openmaic.scene.slide.content';
   };
 
   const generator: OpenMaicGenerator = {
@@ -137,15 +157,27 @@ export function createOpenMaicGenerator(config: OpenMaicGeneratorConfig = {}): O
       const searchWarnings: GenerationWarning[] = [];
       if (input.webSearch && !research) {
         try {
-          research = await performWebSearch({
-            requirement: input.requirement,
-            materialText: input.materials?.text,
-            providerId: config.searchProviderId,
-            llm: getLLM(),
-            prompts,
-            signal: input.signal,
-            onProgress: input.onProgress,
-          });
+          if (config.providers) {
+            const searchPort = config.providers.search('openmaic.search.web');
+            const rewriteLlm = getLLM('openmaic.outline.query_rewrite');
+            const query = input.requirement.slice(0, 500);
+            research = await searchPort.search({
+              query,
+              requirement: input.requirement,
+              signal: input.signal,
+            });
+            void rewriteLlm;
+          } else {
+            research = await performWebSearch({
+              requirement: input.requirement,
+              materialText: input.materials?.text,
+              providerId: config.searchProviderId,
+              llm: getLLM('openmaic.outline.query_rewrite'),
+              prompts,
+              signal: input.signal,
+              onProgress: input.onProgress,
+            });
+          }
         } catch (error) {
           if (input.strictSearch) throw error;
           searchWarnings.push({
@@ -154,7 +186,11 @@ export function createOpenMaicGenerator(config: OpenMaicGeneratorConfig = {}): O
           });
         }
       }
-      const result = await runOutline({ ...input, research }, getLLM(), prompts);
+      const result = await runOutline(
+        { ...input, research },
+        getLLM('openmaic.outline.generate'),
+        prompts,
+      );
       result.document.warnings.push(...searchWarnings);
       return result;
     },
@@ -180,9 +216,11 @@ export function createOpenMaicGenerator(config: OpenMaicGeneratorConfig = {}): O
           'No supported scenes remain after filtering PBL outlines.',
         );
 
-      if (input.image) resolveImageProvider(config.imageProviderId);
-      if (input.video) resolveVideoProvider(config.videoProviderId);
-      if (input.tts) resolveTtsProvider(config.ttsProviderId);
+      if (!config.providers) {
+        if (input.image) resolveImageProvider(config.imageProviderId);
+        if (input.video) resolveVideoProvider(config.videoProviderId);
+        if (input.tts) resolveTtsProvider(config.ttsProviderId);
+      }
 
       const stage = createStage(
         source.courseTitle ?? '',
@@ -211,7 +249,7 @@ export function createOpenMaicGenerator(config: OpenMaicGeneratorConfig = {}): O
               generateSceneContent(
                 outline,
                 restored.materials,
-                getLLM(),
+                getLLM(getSceneContentOperation(outline.type)),
                 prompts,
                 agents,
                 source.languageDirective,
@@ -230,7 +268,7 @@ export function createOpenMaicGenerator(config: OpenMaicGeneratorConfig = {}): O
               generateSceneActions(
                 outline,
                 content,
-                getLLM(),
+                getLLM('openmaic.scene.slide.actions'),
                 prompts,
                 agents,
                 {
@@ -270,6 +308,9 @@ export function createOpenMaicGenerator(config: OpenMaicGeneratorConfig = {}): O
         imageProviderId: config.imageProviderId,
         videoProviderId: config.videoProviderId,
         ttsProviderId: config.ttsProviderId,
+        imagePort: config.providers?.image('openmaic.media.image.generate'),
+        videoPort: config.providers?.video('openmaic.media.video.generate'),
+        ttsPort: config.providers?.tts('openmaic.media.tts'),
         signal: input.signal,
         onProgress: input.onProgress,
       });
@@ -304,15 +345,17 @@ export function createOpenMaicGenerator(config: OpenMaicGeneratorConfig = {}): O
       if (!input.requirement.trim())
         throw new OpenMaicError('INVALID_ARGUMENT', 'Requirement must not be empty.');
       input.onProgress?.({ type: 'preflight', message: 'Validating providers and inputs' });
-      getLLM();
-      if (input.webSearch) {
-        // Resolve before extraction or any paid call.
-        const { resolveSearchProvider } = await import('./search/index.js');
-        resolveSearchProvider(config.searchProviderId);
+      getLLM('openmaic.outline.generate');
+      if (!config.providers) {
+        if (input.webSearch) {
+          // Resolve before extraction or any paid call.
+          const { resolveSearchProvider } = await import('./search/index.js');
+          resolveSearchProvider(config.searchProviderId);
+        }
+        if (input.image) resolveImageProvider(config.imageProviderId);
+        if (input.video) resolveVideoProvider(config.videoProviderId);
+        if (input.tts) resolveTtsProvider(config.ttsProviderId);
       }
-      if (input.image) resolveImageProvider(config.imageProviderId);
-      if (input.video) resolveVideoProvider(config.videoProviderId);
-      if (input.tts) resolveTtsProvider(config.ttsProviderId);
       const materials =
         input.materials ??
         (input.materialPaths?.length

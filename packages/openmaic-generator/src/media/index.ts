@@ -543,6 +543,32 @@ export interface GenerateMediaOptions {
   imageProviderId?: string;
   videoProviderId?: string;
   ttsProviderId?: string;
+  /** Injected ports take precedence over env-resolved providers. */
+  imagePort?: {
+    generate(input: {
+      prompt: string;
+      elementId: string;
+      aspectRatio?: string;
+      signal?: AbortSignal;
+    }): Promise<GeneratedAssetBlob>;
+  };
+  videoPort?: {
+    generate(input: {
+      prompt: string;
+      elementId: string;
+      duration?: number;
+      aspectRatio?: string;
+      signal?: AbortSignal;
+    }): Promise<GeneratedAssetBlob>;
+  };
+  ttsPort?: {
+    synthesize(input: {
+      text: string;
+      voiceId?: string;
+      speed?: number;
+      signal?: AbortSignal;
+    }): Promise<GeneratedAssetBlob>;
+  };
   signal?: AbortSignal;
   onProgress?: (event: ProgressEvent) => void;
 }
@@ -552,9 +578,16 @@ export async function generateRequestedMedia(
   outlines: readonly { id: string; mediaGenerations?: MediaGenerationRequest[] }[],
   options: GenerateMediaOptions,
 ): Promise<{ assets: GeneratedAssetBlob[]; warnings: GenerationWarning[] }> {
-  const imageProvider = options.image ? resolveImageProvider(options.imageProviderId) : undefined;
-  const videoProvider = options.video ? resolveVideoProvider(options.videoProviderId) : undefined;
-  const ttsProvider = options.tts ? resolveTtsProvider(options.ttsProviderId) : undefined;
+  const imageProvider =
+    options.image && !options.imagePort
+      ? resolveImageProvider(options.imageProviderId)
+      : undefined;
+  const videoProvider =
+    options.video && !options.videoPort
+      ? resolveVideoProvider(options.videoProviderId)
+      : undefined;
+  const ttsProvider =
+    options.tts && !options.ttsPort ? resolveTtsProvider(options.ttsProviderId) : undefined;
   const assets: GeneratedAssetBlob[] = [];
   const warnings: GenerationWarning[] = [];
   const run = async (ref: string, operation: () => Promise<GeneratedAssetBlob>) => {
@@ -577,22 +610,46 @@ export async function generateRequestedMedia(
   for (const outline of outlines) {
     for (const request of outline.mediaGenerations ?? []) {
       throwIfAborted(options.signal);
-      if (request.type === 'image' && imageProvider)
-        await run(request.elementId, () => generateImage(imageProvider, request, options.signal));
-      if (request.type === 'video' && videoProvider)
-        await run(request.elementId, () => generateVideo(videoProvider, request, options.signal));
+      if (request.type === 'image' && (options.imagePort || imageProvider))
+        await run(request.elementId, () =>
+          options.imagePort
+            ? options.imagePort.generate({
+                prompt: request.prompt,
+                elementId: request.elementId,
+                aspectRatio: request.aspectRatio,
+                signal: options.signal,
+              })
+            : generateImage(imageProvider!, request, options.signal),
+        );
+      if (request.type === 'video' && (options.videoPort || videoProvider))
+        await run(request.elementId, () =>
+          options.videoPort
+            ? options.videoPort.generate({
+                prompt: request.prompt,
+                elementId: request.elementId,
+                duration: request.duration,
+                aspectRatio: request.aspectRatio,
+                signal: options.signal,
+              })
+            : generateVideo(videoProvider!, request, options.signal),
+        );
     }
   }
-  if (ttsProvider) {
+  if (options.ttsPort || ttsProvider) {
     for (const scene of scenes) {
       const actions: Action[] = scene.actions ?? [];
       for (const action of actions) {
         if (action.type !== 'speech' || !action.text.trim()) continue;
         const ref = `audio_${createHash('sha256').update(`${scene.id}\0${action.id}\0${action.text}`).digest('hex').slice(0, 20)}`;
         await run(ref, async () => {
-          const asset = await generateTts(ttsProvider, action.text, ref, options.signal);
-          (action as SpeechAction).audioId = ref;
-          return asset;
+          const asset = options.ttsPort
+            ? await options.ttsPort.synthesize({
+                text: action.text,
+                signal: options.signal,
+              }).then((blob) => ({ ...blob, ref: blob.ref || ref }))
+            : await generateTts(ttsProvider!, action.text, ref, options.signal);
+          (action as SpeechAction).audioId = asset.ref || ref;
+          return { ...asset, ref: asset.ref || ref };
         });
       }
     }
