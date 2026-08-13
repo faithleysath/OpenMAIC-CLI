@@ -34,7 +34,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@faithleysath/openmaic-generator": "workspace:^0.1.1"
+    "@faithleysath/openmaic-generator": "workspace:^0.2.0"
   },
   "devDependencies": {
     "@types/node": "^20",
